@@ -520,7 +520,7 @@ static char *SanitizeForPrinting(const char *src, char *dest, const size_t destS
 	return dest;
 }
 
-static void PrintComponents(
+static void TestComponentsSpeed(
 		struct ExecBase *SysBase,
 		struct DosLibrary *DOSBase,
 		struct CiaTimer *ciaTimer,
