@@ -11,49 +11,42 @@
 #include <string.h>
 #include <stdarg.h>
 
-#if !defined(NO_INLINE_STDARG) && (__STDC__ == 1L) && (__STDC_VERSION__ >= 199901L)
-LONG __Printf(__reg("a6") void *, __reg("a0") CONST_STRPTR format, ...)="\tmove.l\ta0,d1\n\tmove.l\td2,-(a7)\n\tmove.l\ta7,d2\n\taddq.l\t#4,d2\n\tjsr\t-954(a6)\n\tmove.l\t(a7)+,d2";
-#define Printf(...) __Printf(DOSBase, __VA_ARGS__)
-#endif
-
 #include "CiaTimer.h"
 #include "TimingFunctions.h"
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
-const char Version[] = "$VER: TestResidentSpeed 0.59 (10.1.2022) by Patrik Axelsson";
+const char Version[] = "$VER: TestResidentSpeed 0.61 (17.1.2022) by Patrik Axelsson";
 
 enum ComponentType {
 	ComponentType_None,
 	ComponentType_Memory,
 	ComponentType_Resident,
 	ComponentType_LibBase,
+	ComponentType_EndMarker
 };
 
 struct Component {
 	enum ComponentType type;
 	void *address;
+	unsigned version;
+	unsigned revision;
+	uint8_t *startAddress;
 	size_t size;
 	char name[32];
 };
 
-static bool IsLink(struct Resident *resident);
-static struct Resident **GetLinkAddr(struct Resident *resident);
-static void PrintResidentList(struct ExecBase *SysBase, struct DosLibrary *DOSBase, struct CiaTimer *ciaTimer, const struct Resident **residentList, struct Resident **seenResidents, void *bestMem, bool showAll, bool verbose);
-static void PrintResident(struct ExecBase *SysBase, struct DosLibrary *DOSBase, struct CiaTimer *ciaTimer, struct Resident *resident, void *bestMem, bool showAll, bool verbose);
-static void PrintLibraryList(struct ExecBase *SysBase, struct DosLibrary *DOSBase, struct CiaTimer *ciaTimer, struct List *libList, void *bestMem, bool showAll, bool verbose);
-static void PrintLibrary(struct ExecBase *SysBase, struct DosLibrary *DOSBase, struct CiaTimer *ciaTimer, struct Library *libBase, void *bestMem, bool showAll, bool verbose);
-
-static void * PrintMemoryList(struct ExecBase *SysBase, struct DosLibrary *DOSBase, struct CiaTimer *ciaTimer, struct List *memList, bool showAll, bool verbose);
+static struct Component *AddMemoriesToComponents(struct ExecBase *SysBase, struct List *memList, struct Component *nextComponent);
+static struct Component *AddResidentsAndAssociatedLibBasesToComponents(struct ExecBase *SysBase, struct Resident **residentPtrList, struct Component *nextComponent);
+static void TestComponentsSpeed(struct ExecBase *SysBase, struct DosLibrary *DOSBase, struct CiaTimer *ciaTimer, struct Component *startComponent, void *bestMem, bool showAll, bool verbose);
 
 LONG TestResidentSpeed(void) {
 	struct ExecBase *SysBase = *(struct ExecBase **) 4;
 	// Variables needing cleanup at end
 	struct DosLibrary *DOSBase = NULL;
 	struct RDArgs *args = NULL;
-	struct CiaTimer ciaTimerStore;
 	struct CiaTimer *ciaTimer = NULL;
-	struct Resident **seenResidentPtrList = NULL;
+	struct Component *components = NULL;
 	
 	LONG retval = RETURN_ERROR;
 
@@ -72,35 +65,42 @@ LONG TestResidentSpeed(void) {
 	const bool showAll = NULL != argsValues[0];
 	const bool verbose = NULL != argsValues[1];
 	
+	struct CiaTimer ciaTimerStore;
 	ciaTimer = AllocCiaTimer(SysBase, &ciaTimerStore);
 	if (NULL == ciaTimer) {
 		Printf("Failed allocating a timer!\n");
 		goto cleanup;
 	}
 
-	seenResidentPtrList = AllocVec(sizeof(struct Resident *) * 1024, MEMF_ANY | MEMF_CLEAR);
-	if (NULL == seenResidentPtrList) {
+	const size_t componentsSize = 256;
+	components = AllocVec(sizeof(struct Component) * componentsSize, MEMF_ANY | MEMF_CLEAR);
+	if (NULL == components) {
 		Printf("Could not allocate buffer");
 	}
+	components[componentsSize - 1].type = ComponentType_EndMarker;
 
 	StartCiaTimer(ciaTimer);
 
-	if (verbose) {
-		Printf("%-8s %-23s %-7s %-4s %-8s %-8s %-6s %-4s %-8s %-6s %-5s %-8s %-7s\n", "Type", "Name", "Ver", "Size", "Address", "Location", "TSize", "EClk", "Speed", "ITSize", "IEClk", "ISpeed", "Speed %");
+	struct Component *nextComponent = components;
+	const struct Component *firstMemoryComponent = nextComponent;
+	// The lists we are iterating can change during iteration if
+	// task-switching is not forbidden.
+	Forbid();
+	nextComponent = AddMemoriesToComponents(SysBase, &SysBase->MemList, nextComponent);
+	nextComponent = AddResidentsAndAssociatedLibBasesToComponents(SysBase, SysBase->ResModules, nextComponent);
+	Permit();
+
+	if (ComponentType_Memory != firstMemoryComponent->type) {
+		PutStr("Found no memory!\n");
+		goto cleanup;
 	}
-	else {
-		Printf("%-8s %-23s %-7s %-4s %-8s %-8s %-7s\n", "Type", "Name", "Ver", "Size", "Location", "Speed", "Speed %");
-	}
-	void *bestMem = PrintMemoryList(SysBase, DOSBase, ciaTimer, &SysBase->MemList, showAll, verbose);
-	//unsigned maxSpeed = 0;
-	PrintResidentList(SysBase, DOSBase, ciaTimer, SysBase->ResModules, seenResidentPtrList, bestMem, showAll, verbose);
-	//PrintLibraryList(SysBase, DOSBase, ciaTimer, &SysBase->LibList, bestMem, showAll, verbose);
-	//PrintLibraryList(SysBase, DOSBase, ciaTimer, &SysBase->DeviceList, bestMem, showAll, verbose);
-	//PrintLibraryList(SysBase, DOSBase, ciaTimer, &SysBase->ResourceList, bestMem, showAll, verbose);
+	void *bestMem = firstMemoryComponent->address;
+
+	TestComponentsSpeed(SysBase, DOSBase, ciaTimer, components, bestMem, showAll, verbose); 
 
 	retval = RETURN_OK;
 cleanup:
-	FreeVec(seenResidentPtrList);
+	FreeVec(components);
 	FreeCiaTimer(ciaTimer);
 	if (NULL != args) {
 		FreeArgs(args);
@@ -109,20 +109,6 @@ cleanup:
 	
 	return retval;
 }
-
-static bool IsLink(struct Resident *resident) {
-	return (ULONG) resident >> 31 == 1;
-}
-
-static struct Resident **GetLinkAddr(struct Resident *resident) {
-	return (void *) (((ULONG) resident << 1) >> 1);
-}
-
-struct ReadResult {
-	size_t length;
-	unsigned eClocks;
-};
-
 
 struct InitTable {
 	ULONG it_LibBaseSize;
@@ -250,7 +236,13 @@ static size_t CalcSizeFromResidentContents(struct Resident *resident) {
 	return (uint8_t *) maxAddress - (uint8_t *) minAddress;
 }
 
-static struct TimingResult TimeReads(struct ExecBase *SysBase, struct DosLibrary *DOSBase, struct CiaTimer *ciaTimer, void *addr, size_t length) {
+struct FullTimingResult {
+	uint32_t eClocks;
+	size_t actualLength;
+	uint32_t speed;
+};
+
+static struct FullTimingResult TimeReads(struct ExecBase *SysBase, struct DosLibrary *DOSBase, struct CiaTimer *ciaTimer, void *addr, size_t length) {
 
 	struct TimingResult medianResult;
 	size_t proposedTestLength = 0;
@@ -295,7 +287,13 @@ static struct TimingResult TimeReads(struct ExecBase *SysBase, struct DosLibrary
 	} while (proposedTestLength < length);
 
 
-	return medianResult;
+	return (struct FullTimingResult) {
+		.eClocks = medianResult.eClocks,
+		.actualLength = medianResult.actualLength,
+		.speed = medianResult.eClocks != 0 ?
+				(uint32_t) ((((uint64_t) medianResult.actualLength) * SysBase->ex_EClockFrequency) / medianResult.eClocks) :
+				-1
+	};
 }
 
 
@@ -320,273 +318,284 @@ static const char *GetLocation(struct ExecBase *SysBase, void *addr) {
 											"Unknown";
 }
 
-static void PrintResident(struct ExecBase *SysBase, struct DosLibrary *DOSBase, struct CiaTimer *ciaTimer, struct Resident *resident, void *bestMem, bool showAll, bool verbose) {
+static struct Component *AddToComponents(
+		struct Component *nextComponent,
+		enum ComponentType type,
+		void *address,
+		unsigned version,
+		unsigned revision,
+		void *startAddress,
+		size_t size,
+		const char *name
+) {
+	if (nextComponent->type != ComponentType_None) {
+		return nextComponent;
+	}
+	nextComponent->type = type;
+	nextComponent->address = address;
+	nextComponent->version = version;
+	nextComponent->revision = revision;
+	nextComponent->startAddress = startAddress;
+	nextComponent->size = size;
+	// Components array is initialized to zero, so name is safe to use as is.
+	if (NULL != name) {
+		// strncpy() is forever broken and generates unterminated strings
+		// when source is longer than the destination, but we avoid that
+		// here as components array is initialized to zero and we don't
+		// allow it to overwrite the last position of name.
+		strncpy(nextComponent->name, name, sizeof(nextComponent->name) - 1);
+	}
+
+	return nextComponent + 1;
+}
+
+static struct Component *FindComponentByAddress(struct Component *startComponent, const void *address) {
+	struct Component *component = startComponent;
+
+	while (component->type != ComponentType_None && component->type != ComponentType_EndMarker) {
+		if (component->address == address) {
+			return component;
+		}
+		component++;
+	}
+	return NULL;
+}
+
+static const char *ComponentType2String(const enum ComponentType type) {
+	const char *strings[] = {
+		"None",
+		"Memory",
+		"Resident",
+		"LibBase",
+	};
+
+	if (ComponentType_EndMarker <= type) {
+		return "Unknown";
+	}
+
+	return strings[type];
+}
+
+static struct Component *AddMemoryToComponents(
+		struct Component *nextComponent,
+		struct MemHeader *memHeader
+) {
+	if (NULL == memHeader) {
+		return nextComponent;
+	}
+	return AddToComponents(
+			nextComponent,
+			ComponentType_Memory,
+			memHeader,
+			0,
+			0,
+			memHeader->mh_Lower,
+			(uint8_t *) memHeader->mh_Upper - (uint8_t *) memHeader,
+			memHeader->mh_Node.ln_Name
+	);
+}
+
+static struct Component *AddResidentToComponents(
+		struct Component *nextComponent,
+		struct Resident *resident
+) {
+	if (NULL == resident) {
+		return nextComponent;
+	}
 	const size_t endskipSize = (resident->rt_EndSkip >= (void *) resident) ?
 			((uint8_t *) resident->rt_EndSkip - (uint8_t *) resident) :
 			0;
 	const size_t calcSize = CalcSizeFromResidentContents(resident);
 	const size_t size = calcSize > endskipSize ? calcSize : endskipSize;
-	uint8_t sanitizedName[24];
-	int i = 0;
-	int j = 0;
-	while (j < (sizeof(sanitizedName) - 1)) {
-		const uint8_t c = resident->rt_Name[i++];
-		if (c == '\0')
-			break;
-		if(IsPrintableIso8859(c)) {
-			sanitizedName[j++] = c;
-		}
-	}
-	sanitizedName[j] = '\0';
-	
-
-	const struct TimingResult result = TimeReads(SysBase, DOSBase, ciaTimer, resident, size);
-	const uint32_t speed = result.eClocks != 0 ?
-			(uint32_t) ((((uint64_t) result.actualLength) * SysBase->ex_EClockFrequency) / result.eClocks) :
-			-1;
-	const struct TimingResult resultBestMem = TimeReads(SysBase, DOSBase, ciaTimer, (uint8_t *) bestMem + (((size_t) resident) & 0xff), size);
-	const uint32_t speedBestMem = resultBestMem.eClocks != 0 ?
-			(uint32_t) ((((uint64_t) resultBestMem.actualLength) * SysBase->ex_EClockFrequency) / resultBestMem.eClocks) :
-			-1;
-	const unsigned percentage = 0 != speedBestMem ?
-			((uint64_t) speed * 100 * 10) / speedBestMem :
-			0;
-	const bool sameSize = result.actualLength == resultBestMem.actualLength;
-	const bool oneEclockMore = result.eClocks == resultBestMem.eClocks + 1;
-	if (showAll || percentage < 98 * 10 && !(sameSize && oneEclockMore)) {
-		const struct HumanSize humanSize = CalcHumanSize(SysBase, size);
-		if (verbose) {
-			Printf(
-					"%-8s %-23s %3lu     %s %08lx %-8s %6lu %4lu %4lu.%03lu %6lu %5lu %4lu.%03lu %5lu.%01lu\n",
-					"Resident",
-					sanitizedName,
-					resident->rt_Version,
-					humanSize.string,
-					resident,
-					GetLocation(SysBase, resident),
-					result.actualLength,
-					result.eClocks,
-					speed / (1024 * 1024),
-					((speed % (1024 * 1024)) * 999) / (1024 * 1024),
-					resultBestMem.actualLength,
-					resultBestMem.eClocks,
-					speedBestMem / (1024 * 1024),
-					((speedBestMem % (1024 * 1024)) * 999) / (1024 * 1024),
-					percentage / 10,
-					percentage % 10
-
-			);
-		}
-		else {
-			Printf(
-					"%-8s %-23s %3lu     %s %-8s %4lu.%03lu %5lu.%01lu\n",
-					"Resident",
-					sanitizedName,
-					resident->rt_Version,
-					humanSize.string,
-					GetLocation(SysBase, resident),
-					speed / (1024 * 1024),
-					((speed % (1024 * 1024)) * 999) / (1024 * 1024),
-					percentage / 10,
-					percentage % 10
-			);
-		
-		}
-	}
-	struct Library *libBase = (void *) FindName(&SysBase->LibList, resident->rt_Name);
-	if (NULL != libBase) {
-		PrintLibrary(SysBase, DOSBase, ciaTimer, libBase, bestMem, showAll, verbose);
-	}
-	libBase = (void *) FindName(&SysBase->DeviceList, resident->rt_Name);
-	if (NULL != libBase) {
-		PrintLibrary(SysBase, DOSBase, ciaTimer, libBase, bestMem, showAll, verbose);
-	}
-	libBase = (void *) FindName(&SysBase->ResourceList, resident->rt_Name);
-	if (NULL != libBase) {
-		PrintLibrary(SysBase, DOSBase, ciaTimer, libBase, bestMem, showAll, verbose);
-	}
+	return AddToComponents(
+			nextComponent,
+			ComponentType_Resident,
+			resident,
+			resident->rt_Version,
+			0,
+			resident,
+			size,
+			resident->rt_Name
+	);
 }
 
-static void PrintResidentList(struct ExecBase *SysBase, struct DosLibrary *DOSBase, struct CiaTimer *ciaTimer, const struct Resident **residentPtrList, struct Resident **seenResidentPtrList, void *bestMem, bool showAll, bool verbose) {
+static struct Component *AddLibBaseToComponents(
+		struct Component *nextComponent,
+		struct Library *libBase
+) {
+	if (NULL == libBase) {
+		return nextComponent;
+	}
+	if (NULL != libBase->lib_Node.ln_Name && 0 == strcmp("FileSystem.resource", libBase->lib_Node.ln_Name)) {
+		return nextComponent;
+	}
+	return AddToComponents(
+			nextComponent,
+			ComponentType_LibBase,
+			libBase,
+			libBase->lib_Version,
+			libBase->lib_Revision,
+			(uint8_t *) libBase - libBase->lib_NegSize,
+			(size_t) libBase->lib_PosSize + libBase->lib_NegSize,
+			libBase->lib_Node.ln_Name
+	);
+}
+
+static struct Component *AddMemoriesToComponents(struct ExecBase *SysBase, struct List *memList, struct Component *nextComponent) {
+	struct MemHeader *memHeader;
+	for (memHeader = (void *) memList->lh_Head; NULL != memHeader->mh_Node.ln_Succ; memHeader = (void *) memHeader->mh_Node.ln_Succ) {
+		nextComponent = AddMemoryToComponents(nextComponent, memHeader);
+	}
+	return nextComponent;
+}
+
+static struct Component *AddLibBasesAssociatedWithResidentToComponents(
+		struct ExecBase *SysBase,
+		struct Resident *resident,
+		struct Component *nextComponent
+) {
+	nextComponent = AddLibBaseToComponents(nextComponent, (void *) FindName(&SysBase->LibList, resident->rt_Name));
+	nextComponent = AddLibBaseToComponents(nextComponent, (void *) FindName(&SysBase->DeviceList, resident->rt_Name));
+	nextComponent = AddLibBaseToComponents(nextComponent, (void *) FindName(&SysBase->ResourceList, resident->rt_Name));
+	return nextComponent;
+}
+
+static bool IsLink(struct Resident *resident) {
+	// If most significant bit is set, it is a link.
+	return (int32_t) resident < 0;
+}
+
+static struct Resident **GetLinkAddr(struct Resident *resident) {
+	return (void *) (((uint32_t) resident << 1) >> 1);
+}
+
+static struct Component *RecursiveAddResidentsAndAssociatedLibBasesToComponents(
+		struct ExecBase *SysBase,
+		struct Resident **residentPtrList,
+		struct Component *startComponent,
+		struct Component *nextComponent
+) {
 	for (struct Resident **residentPtr = residentPtrList; *residentPtr != NULL; residentPtr++) {
 		struct Resident *resident = *residentPtr;
 		if (IsLink(resident)) {
 			const struct Resident **residentLinkPtr = GetLinkAddr(resident);
-			//Printf("--- Link to resident list at %08lx\n", residentLinkPtr);
-			PrintResidentList(SysBase, DOSBase, ciaTimer, residentLinkPtr, seenResidentPtrList, bestMem, showAll, verbose);
-			//Printf("--- Back from link to resident list at %08lx\n", residentLinkPtr);
+			nextComponent = RecursiveAddResidentsAndAssociatedLibBasesToComponents(SysBase, residentLinkPtr, startComponent, nextComponent);
 		}
-		else if (resident->rt_MatchWord == RTC_MATCHWORD && resident == FindResident(resident->rt_Name)) {
-			struct Resident **currentSeenResident = seenResidentPtrList;
-			struct Resident **seenResidentPtr;
-			bool residentSeen = false;
-			for (seenResidentPtr = seenResidentPtrList; *seenResidentPtr != NULL; seenResidentPtr++) {
-				if (*seenResidentPtr == resident) {
-					residentSeen = true;
-					break;
-				}
-			}
-
-			if (residentSeen) {
+		else if (resident->rt_MatchWord == RTC_MATCHWORD) {
+			// Don't add already added residents again.
+			if (NULL != FindComponentByAddress(startComponent, resident)) {
 				continue;
 			}
-			else {
-				*seenResidentPtr = resident;
+			// Only add the version of a resident in use in the system.
+			if (resident != FindResident(resident->rt_Name)) {
+				continue;
 			}
 
-			PrintResident(SysBase, DOSBase, ciaTimer, resident, bestMem, showAll, verbose);
-
+			nextComponent = AddResidentToComponents(nextComponent, resident);
+			nextComponent = AddLibBasesAssociatedWithResidentToComponents(SysBase, resident, nextComponent);
 		}
 	}
+	return nextComponent;
 }
 
-static void PrintLibrary(struct ExecBase *SysBase, struct DosLibrary *DOSBase, struct CiaTimer *ciaTimer, struct Library *libBase, void *bestMem, bool showAll, bool verbose) {
-	const size_t size = (size_t) libBase->lib_PosSize + libBase->lib_NegSize;
-	void *startAddr = (uint8_t *) libBase - libBase->lib_NegSize;
-	uint8_t sanitizedName[24];
-	sanitizedName[0] = '\0';
-	int i = 0;
-	int j = 0;
-	if (NULL != libBase->lib_Node.ln_Name) {
-		if (0 == strcmp("FileSystem.resource", libBase->lib_Node.ln_Name)) {
-			return;
-		}
-		while (j < (sizeof(sanitizedName) - 1)) {
-			const uint8_t c = libBase->lib_Node.ln_Name[i++];
+static struct Component *AddResidentsAndAssociatedLibBasesToComponents(struct ExecBase *SysBase, struct Resident **residentPtrList, struct Component *nextComponent) {
+	return RecursiveAddResidentsAndAssociatedLibBasesToComponents(SysBase, residentPtrList, nextComponent, nextComponent);
+}
+
+static char *SanitizeForPrinting(const char *src, char *dest, const size_t destSize) {
+	size_t i = 0;
+	size_t j = 0;
+	if (NULL != src) {
+		while (j < destSize - 1) {
+			const uint8_t c = src[i++];
 			if (c == '\0')
 				break;
 			if(IsPrintableIso8859(c)) {
-				sanitizedName[j++] = c;
+				dest[j++] = c;
 			}
 		}
+		dest[j] = '\0';
 	}
-	sanitizedName[j] = '\0';
 
-	const struct TimingResult result = TimeReads(SysBase, DOSBase, ciaTimer, startAddr, size);
-	const uint32_t speed = result.eClocks != 0 ?
-			(uint32_t) ((((uint64_t) result.actualLength) * SysBase->ex_EClockFrequency) / result.eClocks) :
-			-1;
-	const struct TimingResult resultBestMem = TimeReads(SysBase, DOSBase, ciaTimer, (uint8_t *) bestMem + (((size_t) startAddr) & 0xff), size);
-	const uint32_t speedBestMem = resultBestMem.eClocks != 0 ?
-			(uint32_t) ((((uint64_t) resultBestMem.actualLength) * SysBase->ex_EClockFrequency) / resultBestMem.eClocks) :
-			-1;
-	const unsigned percentage = 0 != speedBestMem ?
-			((uint64_t) speed * 100 * 10) / speedBestMem :
-			0;
-			const bool sameSize = result.actualLength == resultBestMem.actualLength;
-			const bool oneEclockMore = result.eClocks == resultBestMem.eClocks + 1;
-	if (showAll || percentage < 98 * 10 && !(sameSize && oneEclockMore)) {
-		const struct HumanSize humanSize = CalcHumanSize(SysBase, size); 
-		if (verbose) {
-			Printf(
-					"%-8s %-23s %3lu.%-3lu %s %08lx %-8s %6lu %4lu %4lu.%03lu %6lu %5lu %4lu.%03lu %5lu.%01lu\n",
-					"LibBase",
-					sanitizedName,
-					libBase->lib_Version,
-					libBase->lib_Revision,
-					humanSize.string,
-					libBase,
-					GetLocation(SysBase, libBase),
-					result.actualLength,
-					result.eClocks,
-					speed / (1024 * 1024),
-					((speed % (1024 * 1024)) * 999) / (1024 * 1024),
-					resultBestMem.actualLength,
-					resultBestMem.eClocks,
-					speedBestMem / (1024 * 1024),
-					((speedBestMem % (1024 * 1024)) * 999) / (1024 * 1024),
-					percentage / 10,
-					percentage % 10
-
-			);
-		}
-		else {
-			Printf(
-					"%-8s %-23s %3lu.%-3lu %s %-8s %4lu.%03lu %5lu.%01lu\n",
-					"LibBase",
-					sanitizedName,
-					libBase->lib_Version,
-					libBase->lib_Revision,
-					humanSize.string,
-					GetLocation(SysBase, libBase),
-					speed / (1024 * 1024),
-					((speed % (1024 * 1024)) * 999) / (1024 * 1024),
-					percentage / 10,
-					percentage % 10
-
-			);
-		}
-	}
+	return dest;
 }
 
-static void PrintLibraryList(struct ExecBase *SysBase, struct DosLibrary *DOSBase, struct CiaTimer *ciaTimer, struct List *libList, void *bestMem, bool showAll, bool verbose) {
+static void PrintComponents(
+		struct ExecBase *SysBase,
+		struct DosLibrary *DOSBase,
+		struct CiaTimer *ciaTimer,
+		struct Component *startComponent,
+		void *bestMem,
+		bool showAll,
+		bool verbose
+) {
+	struct Component *component = startComponent;
 
-	struct Library *libBase;
-	for (libBase = (void *) libList->lh_Head; libBase->lib_Node.ln_Succ; libBase = (void *) libBase->lib_Node.ln_Succ) {
-		PrintLibrary(SysBase, DOSBase, ciaTimer, libBase, bestMem, showAll, verbose);
+	if (verbose) {
+		Printf("%-8s %-23s %-7s %-4s %-8s %-8s %-6s %-4s %-8s %-6s %-5s %-8s %-7s\n", "Type", "Name", "Version", "Size", "Address", "Location", "TSize", "EClk", "Speed", "ITSize", "IEClk", "ISpeed", "Speed %");
 	}
-}
+	else {
+		Printf("%-8s %-23s %-7s %-4s %-8s %-8s %-7s\n", "Type", "Name", "Version", "Size", "Location", "Speed", "Speed %");
+	}
 
-static void *PrintMemoryList(struct ExecBase *SysBase, struct DosLibrary *DOSBase, struct CiaTimer *ciaTimer, struct List *memList, bool showAll, bool verbose) {
-	struct MemHeader *mem;
-	void *bestMem = NULL;
-	for (mem = (void *) memList->lh_Head; NULL != mem->mh_Node.ln_Succ; mem = (void *) mem->mh_Node.ln_Succ) {
-		{
-			const size_t size = (uint8_t *) mem->mh_Upper - (uint8_t *) mem;
-			void *startAddr = (uint8_t *) mem;
-			uint8_t sanitizedName[29];
-			sanitizedName[0] = '\0';
-			int i = 0;
-			int j = 0;
-			if (NULL != mem->mh_Node.ln_Name) {
-				while (j < (sizeof(sanitizedName) - 1)) {
-					const uint8_t c = mem->mh_Node.ln_Name[i++];
-					if (c == '\0')
-						break;
-					if (IsPrintableIso8859(c)) {
-						sanitizedName[j++] = c;
-					}
-				}
-				sanitizedName[j] = '\0';
-			}
-		
-			const struct TimingResult result = TimeReads(SysBase, DOSBase, ciaTimer, startAddr, size);
-			const uint32_t speed = result.eClocks != 0 ?
-					(uint32_t) ((((uint64_t) result.actualLength) * SysBase->ex_EClockFrequency) / result.eClocks) :
-					0;
-			if (showAll) {
-				const struct HumanSize humanSize = CalcHumanSize(SysBase, size); 
-				if (verbose) {
-					Printf(
-							"%-8s %-23s         %s %08lx %-8s %6lu %4lu %4lu.%03lu\n",
-							"Memory",
-							sanitizedName,
-							humanSize.string,
-							mem,
-							GetLocation(SysBase, (uint8_t *) mem + 128),
-							result.actualLength,
-							result.eClocks,
-							speed / (1024 * 1024),
-							((speed % (1024 * 1024)) * 999) / (1024 * 1024)
+	while (component->type != ComponentType_None && component->type != ComponentType_EndMarker) {
+		char sanitizedName[24];
+		SanitizeForPrinting(component->name, sanitizedName, sizeof(sanitizedName));
+		const char *componentTypeString = ComponentType2String(component->type);
+		const char *location = GetLocation(SysBase, component->startAddress);
 
-					);
-				}
-				else {
-					Printf(
-							"%-8s %-23s         %s %-8s %4lu.%03lu\n",
-							"Memory",
-							sanitizedName,
-							humanSize.string,
-							GetLocation(SysBase, (uint8_t *) mem + 128),
-							speed / (1024 * 1024),
-							((speed % (1024 * 1024)) * 999) / (1024 * 1024)
-					);
-				}
+		const struct FullTimingResult result = TimeReads(SysBase, DOSBase, ciaTimer, component->startAddress, component->size);
+
+		const struct FullTimingResult resultBestMem = TimeReads(SysBase, DOSBase, ciaTimer, (uint8_t *) bestMem + (((size_t) component->startAddress) & 0xff), component->size);
+
+		const unsigned percentage = 0 != resultBestMem.speed ?
+				((uint64_t) result.speed * 100 * 10) / resultBestMem.speed :
+				0;
+				const bool sameSize = result.actualLength == resultBestMem.actualLength;
+				const bool oneEclockMore = result.eClocks == resultBestMem.eClocks + 1;
+		if (showAll || ComponentType_Memory != component->type && percentage < 98 * 10 && !(sameSize && oneEclockMore)) {
+			const struct HumanSize humanSize = CalcHumanSize(SysBase, component->size); 
+			if (verbose) {
+				Printf(
+						"%-8s %-23s %3lu.%-3lu %s %08lx %-8s %6lu %4lu %4lu.%03lu %6lu %5lu %4lu.%03lu %5lu.%01lu\n",
+						componentTypeString,
+						sanitizedName,
+						component->version,
+						component->revision,
+						humanSize.string,
+						component->address,
+						location,
+						result.actualLength,
+						result.eClocks,
+						result.speed / (1024 * 1024),
+						((result.speed % (1024 * 1024)) * 999) / (1024 * 1024),
+						resultBestMem.actualLength,
+						resultBestMem.eClocks,
+						resultBestMem.speed / (1024 * 1024),
+						((resultBestMem.speed % (1024 * 1024)) * 999) / (1024 * 1024),
+						percentage / 10,
+						percentage % 10
+
+				);
 			}
-			if (NULL == bestMem) {
-				bestMem = mem;
+			else {
+				Printf(
+						"%-8s %-23s %3lu.%-3lu %s %-8s %4lu.%03lu %5lu.%01lu\n",
+						componentTypeString,
+						sanitizedName,
+						component->version,
+						component->revision,
+						humanSize.string,
+						location,
+						result.speed / (1024 * 1024),
+						((result.speed % (1024 * 1024)) * 999) / (1024 * 1024),
+						percentage / 10,
+						percentage % 10
+
+				);
 			}
 		}
+
+		component++;
 	}
-	return bestMem;
 }
