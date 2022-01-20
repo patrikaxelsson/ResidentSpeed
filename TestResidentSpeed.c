@@ -16,7 +16,7 @@
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
-const char Version[] = "$VER: TestResidentSpeed 0.61 (17.1.2022) by Patrik Axelsson";
+const char Version[] = "$VER: TestResidentSpeed 0.63 (20.1.2022) by Patrik Axelsson";
 
 enum ComponentType {
 	ComponentType_None,
@@ -37,7 +37,7 @@ struct Component {
 };
 
 static struct Component *AddMemoriesToComponents(struct ExecBase *SysBase, struct List *memList, struct Component *nextComponent);
-static struct Component *AddResidentsAndAssociatedLibBasesToComponents(struct ExecBase *SysBase, struct Resident **residentPtrList, struct Component *nextComponent);
+static struct Component *AddResidentsAndAssociatedLibBasesToComponents(struct ExecBase *SysBase, struct DosLibrary *DOSBase, struct Resident **residentPtrList, struct Component *nextComponent);
 static void TestComponentsSpeed(struct ExecBase *SysBase, struct DosLibrary *DOSBase, struct CiaTimer *ciaTimer, struct Component *startComponent, void *bestMem, bool showAll, bool verbose);
 
 LONG TestResidentSpeed(void) {
@@ -87,7 +87,7 @@ LONG TestResidentSpeed(void) {
 	// task-switching is not forbidden.
 	Forbid();
 	nextComponent = AddMemoriesToComponents(SysBase, &SysBase->MemList, nextComponent);
-	nextComponent = AddResidentsAndAssociatedLibBasesToComponents(SysBase, SysBase->ResModules, nextComponent);
+	nextComponent = AddResidentsAndAssociatedLibBasesToComponents(SysBase, DOSBase, SysBase->ResModules, nextComponent);
 	Permit();
 
 	if (ComponentType_Memory != firstMemoryComponent->type) {
@@ -133,21 +133,15 @@ struct HumanSize CalcHumanSize(struct ExecBase *SysBase, size_t size) {
 	struct HumanSize humanSize;
 	humanSize.string[0] = '\0';
 	char units[] = {'k', 'M', 'G', 'T'};
-	char unit = '\0';
-	const char *format = "%lu";
-	if (size < 999) {
-		SPrintF(SysBase, humanSize.string, "%4lu", size);
+	if (size <= 1023) {
+		SPrintF(SysBase, humanSize.string, "%7lu", size);
 	} 
 	else {
 		for (size_t i = 0; i < sizeof(units); i++) {
 			if (size / 1024 < 999) {
-				unit = units[i];
-				if (size / 1024 < 10) {
-					SPrintF(SysBase, humanSize.string, "%lu.%01lu%lc", size / 1024, (((size % 1024) * 999) / 1024) / 100, unit);
-				}
-				else {
-					SPrintF(SysBase, humanSize.string, "%3lu%lc", size / 1024, unit);
-				}
+				const char unit = units[i];
+				const size_t sizeFP100 = size * 100;
+				SPrintF(SysBase, humanSize.string, "%3lu.%02lu%lc", size / 1024, (sizeFP100 / 1024) % 100, unit);
 				break;
 			}
 
@@ -306,16 +300,16 @@ static const char *GetLocation(struct ExecBase *SysBase, void *addr) {
 	const size_t addrNum = (size_t) addr; 
 	
 	return memType & MEMF_CHIP ?
-			"Chip RAM" :
+			"Chip" :
 			memType & MEMF_FAST ?
-					"Fast RAM" :
+					"Fast" :
 					(addrNum >= 0xe00000 && addrNum <= 0xefffff) ?
-							"Ext  ROM" :
+							"Extd" :
 							(addrNum >= 0xF00000 && addrNum <= 0xf7ffff) ?
-									"Diag ROM" :
+									"Diag" :
 									(addrNum >= 0xf80000 && addrNum <= 0xffffff) ?
-											"Kick ROM" :
-											"Unknown";
+											"Kick" :
+											"Unkn";
 }
 
 static struct Component *AddToComponents(
@@ -395,13 +389,67 @@ static struct Component *AddMemoryToComponents(
 	);
 }
 
+struct VersionParts {
+	unsigned version;
+	unsigned revision;
+};
+
+static struct VersionParts ParseVersionString(struct DosLibrary *DOSBase, const char *string, unsigned defaultVersion) {
+	struct VersionParts versionParts = {
+		.version = defaultVersion,
+		.revision = 0
+	};
+
+	if (NULL == string) {
+		return versionParts;
+	}
+
+	char c;
+
+	// Find first space
+	while (c = *string) {
+		if (c == ' ') {
+			break;
+		}
+		string++;
+	}
+
+	// Find end of space, here the version number should be
+	while (c = *string) {
+		if (c != ' ') {
+			break;
+		}
+		string++;
+	}
+
+	LONG value;
+
+	LONG numConverted = StrToLong(string, &value);
+	if (numConverted > 0) {
+		string += numConverted;
+		versionParts.version = value;
+	}
+	if (*string++ == '.') {
+		numConverted = StrToLong(string, &value);
+		if (numConverted > 0) {
+			versionParts.revision = value;
+		}
+	}
+
+	return versionParts;
+}
+
 static struct Component *AddResidentToComponents(
+		struct DosLibrary *DOSBase,
 		struct Component *nextComponent,
 		struct Resident *resident
 ) {
 	if (NULL == resident) {
 		return nextComponent;
 	}
+
+	struct VersionParts versionParts = ParseVersionString(DOSBase, resident->rt_IdString, resident->rt_Version);
+
 	const size_t endskipSize = (resident->rt_EndSkip >= (void *) resident) ?
 			((uint8_t *) resident->rt_EndSkip - (uint8_t *) resident) :
 			0;
@@ -411,8 +459,8 @@ static struct Component *AddResidentToComponents(
 			nextComponent,
 			ComponentType_Resident,
 			resident,
-			resident->rt_Version,
-			0,
+			versionParts.version,
+			versionParts.revision,
 			resident,
 			size,
 			resident->rt_Name
@@ -426,9 +474,9 @@ static struct Component *AddLibBaseToComponents(
 	if (NULL == libBase) {
 		return nextComponent;
 	}
-	if (NULL != libBase->lib_Node.ln_Name && 0 == strcmp("FileSystem.resource", libBase->lib_Node.ln_Name)) {
+	/*if (NULL != libBase->lib_Node.ln_Name && 0 == strcmp("FileSystem.resource", libBase->lib_Node.ln_Name)) {
 		return nextComponent;
-	}
+	}*/
 	return AddToComponents(
 			nextComponent,
 			ComponentType_LibBase,
@@ -449,14 +497,45 @@ static struct Component *AddMemoriesToComponents(struct ExecBase *SysBase, struc
 	return nextComponent;
 }
 
-static struct Component *AddLibBasesAssociatedWithResidentToComponents(
-		struct ExecBase *SysBase,
-		struct Resident *resident,
+struct LibBaseLVO {
+	uint16_t jmp;
+	void *function;
+};
+
+static void *GetLibBaseFunction(struct Library *libBase, unsigned num) {
+	return ((struct LibBaseLVO *) libBase)[-num].function;
+}
+
+static struct Component *AddLibBasesWithFunctionsInsideResidentToComponents(
+		struct Component *residentComponent,
+		struct List *libBaseList,
 		struct Component *nextComponent
 ) {
-	nextComponent = AddLibBaseToComponents(nextComponent, (void *) FindName(&SysBase->LibList, resident->rt_Name));
-	nextComponent = AddLibBaseToComponents(nextComponent, (void *) FindName(&SysBase->DeviceList, resident->rt_Name));
-	nextComponent = AddLibBaseToComponents(nextComponent, (void *) FindName(&SysBase->ResourceList, resident->rt_Name));
+	struct Library *libBase;
+	for (libBase = (void *) libBaseList->lh_Head; NULL != libBase->lib_Node.ln_Succ; libBase = (void *) libBase->lib_Node.ln_Succ) {
+		// Check the four first mandatory ones
+		for (unsigned i = 0; i < 4; i++) {
+			const uint8_t *libBaseFunction = GetLibBaseFunction(libBase, i);
+			if (
+					libBaseFunction >= residentComponent->startAddress &&
+					libBaseFunction <= (residentComponent->startAddress + residentComponent->size)
+			) {
+				nextComponent = AddLibBaseToComponents(nextComponent, libBase);
+				break;
+			}
+		}
+	}
+	return nextComponent;
+}
+
+static struct Component *AddLibBasesAssociatedWithResidentToComponents(
+		struct ExecBase *SysBase,
+		struct Component *residentComponent,
+		struct Component *nextComponent
+) {
+	nextComponent = AddLibBasesWithFunctionsInsideResidentToComponents(residentComponent, &SysBase->LibList, nextComponent);
+	nextComponent = AddLibBasesWithFunctionsInsideResidentToComponents(residentComponent, &SysBase->DeviceList, nextComponent);
+	nextComponent = AddLibBasesWithFunctionsInsideResidentToComponents(residentComponent, &SysBase->ResourceList, nextComponent);
 	return nextComponent;
 }
 
@@ -469,8 +548,10 @@ static struct Resident **GetLinkAddr(struct Resident *resident) {
 	return (void *) (((uint32_t) resident << 1) >> 1);
 }
 
+
 static struct Component *RecursiveAddResidentsAndAssociatedLibBasesToComponents(
 		struct ExecBase *SysBase,
+		struct DosLibrary *DOSBase,
 		struct Resident **residentPtrList,
 		struct Component *startComponent,
 		struct Component *nextComponent
@@ -479,7 +560,7 @@ static struct Component *RecursiveAddResidentsAndAssociatedLibBasesToComponents(
 		struct Resident *resident = *residentPtr;
 		if (IsLink(resident)) {
 			const struct Resident **residentLinkPtr = GetLinkAddr(resident);
-			nextComponent = RecursiveAddResidentsAndAssociatedLibBasesToComponents(SysBase, residentLinkPtr, startComponent, nextComponent);
+			nextComponent = RecursiveAddResidentsAndAssociatedLibBasesToComponents(SysBase, DOSBase, residentLinkPtr, startComponent, nextComponent);
 		}
 		else if (resident->rt_MatchWord == RTC_MATCHWORD) {
 			// Don't add already added residents again.
@@ -491,15 +572,22 @@ static struct Component *RecursiveAddResidentsAndAssociatedLibBasesToComponents(
 				continue;
 			}
 
-			nextComponent = AddResidentToComponents(nextComponent, resident);
-			nextComponent = AddLibBasesAssociatedWithResidentToComponents(SysBase, resident, nextComponent);
+			struct Component *residentComponent = nextComponent;
+			nextComponent = AddResidentToComponents(DOSBase, nextComponent, resident);
+			nextComponent = AddLibBasesAssociatedWithResidentToComponents(SysBase, residentComponent, nextComponent);
 		}
 	}
 	return nextComponent;
 }
 
-static struct Component *AddResidentsAndAssociatedLibBasesToComponents(struct ExecBase *SysBase, struct Resident **residentPtrList, struct Component *nextComponent) {
-	return RecursiveAddResidentsAndAssociatedLibBasesToComponents(SysBase, residentPtrList, nextComponent, nextComponent);
+
+static struct Component *AddResidentsAndAssociatedLibBasesToComponents(
+		struct ExecBase *SysBase,
+		struct DosLibrary *DOSBase,
+		struct Resident **residentPtrList,
+		struct Component *nextComponent
+) {
+	return RecursiveAddResidentsAndAssociatedLibBasesToComponents(SysBase, DOSBase, residentPtrList, nextComponent, nextComponent);
 }
 
 static char *SanitizeForPrinting(const char *src, char *dest, const size_t destSize) {
@@ -532,10 +620,10 @@ static void TestComponentsSpeed(
 	struct Component *component = startComponent;
 
 	if (verbose) {
-		Printf("%-8s %-23s %-7s %-4s %-8s %-8s %-6s %-4s %-8s %-6s %-5s %-8s %-7s\n", "Type", "Name", "Version", "Size", "Address", "Location", "TSize", "EClk", "Speed", "ITSize", "IEClk", "ISpeed", "Speed %");
+		Printf("%-8s %-23s %-7s %-7s %-8s %-4s %-6s %-4s %-7s %-6s %-5s %-7s %-7s\n", "Type", "Name", "Version", "Size", "Address", "Loc", "TSize", "EClk", "Speed", "ITSize", "IEClk", "ISpeed", "Speed %");
 	}
 	else {
-		Printf("%-8s %-23s %-7s %-4s %-8s %-8s %-7s\n", "Type", "Name", "Version", "Size", "Location", "Speed", "Speed %");
+		Printf("%-8s %-23s %-7s %-7s %-4s %-7s %-7s\n", "Type", "Name", "Version", "Size", "Loc", "Speed", "Speed %");
 	}
 
 	while (component->type != ComponentType_None && component->type != ComponentType_EndMarker) {
@@ -551,13 +639,20 @@ static void TestComponentsSpeed(
 		const unsigned percentage = 0 != resultBestMem.speed ?
 				((uint64_t) result.speed * 100 * 10) / resultBestMem.speed :
 				0;
-				const bool sameSize = result.actualLength == resultBestMem.actualLength;
-				const bool oneEclockMore = result.eClocks == resultBestMem.eClocks + 1;
-		if (showAll || ComponentType_Memory != component->type && percentage < 98 * 10 && !(sameSize && oneEclockMore)) {
-			const struct HumanSize humanSize = CalcHumanSize(SysBase, component->size); 
+		const bool sameSize = result.actualLength == resultBestMem.actualLength;
+		const bool oneEclockMore = result.eClocks == resultBestMem.eClocks + 1;
+		const bool performanceIssue =
+				ComponentType_Memory != component->type &&
+				percentage < 98 * 10 &&
+				!(sameSize && oneEclockMore) &&
+				component == FindComponentByAddress(startComponent, component->address);
+		if (showAll || performanceIssue) {
+			const struct HumanSize humanSize = CalcHumanSize(SysBase, component->size);
+			const struct HumanSize humanSpeed = CalcHumanSize(SysBase, result.speed);
 			if (verbose) {
+				const struct HumanSize humanBestMemSpeed = CalcHumanSize(SysBase, resultBestMem.speed);
 				Printf(
-						"%-8s %-23s %3lu.%-3lu %s %08lx %-8s %6lu %4lu %4lu.%03lu %6lu %5lu %4lu.%03lu %5lu.%01lu\n",
+						"%-8s %-23s %3lu.%-3lu %s %08lx %-4s %6lu %4lu %s %6lu %5lu %s %5lu.%01lu\n",
 						componentTypeString,
 						sanitizedName,
 						component->version,
@@ -567,12 +662,10 @@ static void TestComponentsSpeed(
 						location,
 						result.actualLength,
 						result.eClocks,
-						result.speed / (1024 * 1024),
-						((result.speed % (1024 * 1024)) * 999) / (1024 * 1024),
+						humanSpeed.string,
 						resultBestMem.actualLength,
 						resultBestMem.eClocks,
-						resultBestMem.speed / (1024 * 1024),
-						((resultBestMem.speed % (1024 * 1024)) * 999) / (1024 * 1024),
+						humanBestMemSpeed.string,
 						percentage / 10,
 						percentage % 10
 
@@ -580,18 +673,16 @@ static void TestComponentsSpeed(
 			}
 			else {
 				Printf(
-						"%-8s %-23s %3lu.%-3lu %s %-8s %4lu.%03lu %5lu.%01lu\n",
+						"%-8s %-23s %3lu.%-3lu %s %-4s %s %5lu.%01lu\n",
 						componentTypeString,
 						sanitizedName,
 						component->version,
 						component->revision,
 						humanSize.string,
 						location,
-						result.speed / (1024 * 1024),
-						((result.speed % (1024 * 1024)) * 999) / (1024 * 1024),
+						humanSpeed.string,
 						percentage / 10,
 						percentage % 10
-
 				);
 			}
 		}
