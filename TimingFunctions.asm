@@ -59,64 +59,6 @@ TimeConsequtiveReadsRaw48x:
 ; Arguments:
 ; a2 = CIA timer low addr
 ; a0 = read start addr
-; d0 = length of read
-; Returns:
-; d0 - diff (cost of timer register access not accounted for)
-; d1 - actual length read
-TimeConsequtiveReadsRaw4x:
-	movem.l	d2/a3,-(sp)
-
-	move.l	a0,a3		; Save start address for later.
-
-	lsr.l	#2,d0		; Calculate how many longwords to read.
-	move.w	d0,d1		; Calculate how many steps into
-	and.w	#15,d1		; the loop we should start at
-	moveq	#16,d2		; for the first iteration.
-	sub.w	d1,d2
-	mulu.w	#2,d2		; Multiply with sizeof move.l to get right offset,
-						; (how to calc that properly)?
-	lea		.loopStart(pc,d2.w),a1
-
-	move.l	d0,d1
-	lsr.l	#4,d1		; How many times to loop
-
-	moveq	#0,d0
-	move.b	(a2),d0		; Save timer before value.
-	jmp		(a1)
-.loopStart:
-	move.l	(a0)+,d2
-	move.l	(a0)+,d2
-	move.l	(a0)+,d2
-	move.l	(a0)+,d2
-	move.l	(a0)+,d2
-	move.l	(a0)+,d2
-	move.l	(a0)+,d2
-	move.l	(a0)+,d2
-	move.l	(a0)+,d2
-	move.l	(a0)+,d2
-	move.l	(a0)+,d2
-	move.l	(a0)+,d2
-	move.l	(a0)+,d2
-	move.l	(a0)+,d2
-	move.l	(a0)+,d2
-	move.l	(a0)+,d2
-.loopEnd:
-	dbra	d1,.loopStart
-
-	sub.b	(a2),d0		; Get timer after value and calculate duration of
-						; test.
-
-.end:
-	move.l	a0,d1		; Calculate actual read
-	sub.l	a3,d1		; data length.
-
-	movem.l	(sp)+,d2/a3
-	rts
-
-
-; Arguments:
-; a2 = CIA timer low addr
-; a0 = read start addr
 ; d0 = length of test
 ; Returns:
 ; d0 - diff

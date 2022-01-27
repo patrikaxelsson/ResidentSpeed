@@ -12,15 +12,17 @@
 #include <stdarg.h>
 
 #include "CiaTimer.h"
+#include "GetVBR.h"
 #include "TimingFunctions.h"
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
-const char Version[] = "$VER: TestResidentSpeed 0.63 (20.1.2022) by Patrik Axelsson";
+const char Version[] = "$VER: TestResidentSpeed 0.68 (27.1.2022) by Patrik Axelsson";
 
 enum ComponentType {
 	ComponentType_None,
 	ComponentType_Memory,
+	ComponentType_Region,
 	ComponentType_Resident,
 	ComponentType_LibBase,
 	ComponentType_EndMarker
@@ -36,9 +38,34 @@ struct Component {
 	char name[32];
 };
 
-static struct Component *AddMemoriesToComponents(struct ExecBase *SysBase, struct List *memList, struct Component *nextComponent);
-static struct Component *AddResidentsAndAssociatedLibBasesToComponents(struct ExecBase *SysBase, struct DosLibrary *DOSBase, struct Resident **residentPtrList, struct Component *nextComponent);
-static void TestComponentsSpeed(struct ExecBase *SysBase, struct DosLibrary *DOSBase, struct CiaTimer *ciaTimer, struct Component *startComponent, void *bestMem, bool showAll, bool verbose);
+static struct Component *AddMemoriesToComponents(
+		struct ExecBase *SysBase,
+		struct List *memList,
+		struct Component *nextComponent
+);
+static struct Component *AddInterruptVectorTableToComponents(
+		struct ExecBase *SysBase,
+		struct Component *nextComponent
+);
+static struct Component *AddSystemStackToComponents(
+		struct ExecBase *SysBase,
+		struct Component *nextComponent
+);
+static struct Component *AddResidentsAndAssociatedLibBasesToComponents(
+		struct ExecBase *SysBase,
+		struct DosLibrary *DOSBase,
+		struct Resident **residentPtrList,
+		struct Component *nextComponent
+);
+static void TestComponentsSpeed(
+		struct ExecBase *SysBase,
+		struct DosLibrary *DOSBase,
+		struct CiaTimer *ciaTimer,
+		struct Component *startComponent,
+		struct Component *bestMemory,
+		bool showAll,
+		bool verbose
+);
 
 LONG TestResidentSpeed(void) {
 	struct ExecBase *SysBase = *(struct ExecBase **) 4;
@@ -82,21 +109,22 @@ LONG TestResidentSpeed(void) {
 	StartCiaTimer(ciaTimer);
 
 	struct Component *nextComponent = components;
-	const struct Component *firstMemoryComponent = nextComponent;
+	struct Component *firstMemory = nextComponent;
 	// The lists we are iterating can change during iteration if
 	// task-switching is not forbidden.
 	Forbid();
 	nextComponent = AddMemoriesToComponents(SysBase, &SysBase->MemList, nextComponent);
+	nextComponent = AddInterruptVectorTableToComponents(SysBase, nextComponent);
+	nextComponent = AddSystemStackToComponents(SysBase, nextComponent);
 	nextComponent = AddResidentsAndAssociatedLibBasesToComponents(SysBase, DOSBase, SysBase->ResModules, nextComponent);
 	Permit();
 
-	if (ComponentType_Memory != firstMemoryComponent->type) {
+	if (ComponentType_Memory != firstMemory->type) {
 		PutStr("Found no memory!\n");
 		goto cleanup;
 	}
-	void *bestMem = firstMemoryComponent->address;
 
-	TestComponentsSpeed(SysBase, DOSBase, ciaTimer, components, bestMem, showAll, verbose); 
+	TestComponentsSpeed(SysBase, DOSBase, ciaTimer, components, firstMemory, showAll, verbose); 
 
 	retval = RETURN_OK;
 cleanup:
@@ -295,21 +323,28 @@ static bool IsPrintableIso8859(uint8_t c) {
 	return !(c < 0x20 || (c > 0x7e && c < 0xa0));
 }
 
-static const char *GetLocation(struct ExecBase *SysBase, void *addr) {
-	const ULONG memType = TypeOfMem(addr);
-	const size_t addrNum = (size_t) addr; 
+static const char *GetLocation(struct ExecBase *SysBase, void *address) {
+	const ULONG memType = TypeOfMem(address);
 	
-	return memType & MEMF_CHIP ?
+	return memType & MEMF_CHIP || address < (void *) 262144 ?
 			"Chip" :
 			memType & MEMF_FAST ?
 					"Fast" :
-					(addrNum >= 0xe00000 && addrNum <= 0xefffff) ?
+					(address >= (void *) 0xe00000 && address <= (void *) 0xefffff) ?
 							"Extd" :
-							(addrNum >= 0xF00000 && addrNum <= 0xf7ffff) ?
+							(address >= (void *) 0xF00000 && address <= (void *) 0xf7ffff) ?
 									"Diag" :
-									(addrNum >= 0xf80000 && addrNum <= 0xffffff) ?
+									(address >= (void *) 0xf80000 && address <= (void *) 0xffffff) ?
 											"Kick" :
 											"Unkn";
+}
+
+static const char *GetComponentLocation(struct ExecBase *SysBase, const struct Component *component) {
+	const void *address = ComponentType_Memory != component->type ?
+			component->address :
+			(uint8_t *) component->address + (component->size >> 1);
+
+	return GetLocation(SysBase, address);
 }
 
 static struct Component *AddToComponents(
@@ -359,6 +394,7 @@ static const char *ComponentType2String(const enum ComponentType type) {
 	const char *strings[] = {
 		"None",
 		"Memory",
+		"Region",
 		"Resident",
 		"LibBase",
 	};
@@ -368,6 +404,47 @@ static const char *ComponentType2String(const enum ComponentType type) {
 	}
 
 	return strings[type];
+}
+
+static void *GetVBR(struct ExecBase *SysBase) {
+	if (SysBase->AttnFlags & AFF_68010) {
+		return (void *) Supervisor((void *)&GetVBRInSupervisorMode);
+	}
+	return NULL;
+}
+
+static struct Component *AddInterruptVectorTableToComponents(
+		struct ExecBase *SysBase,
+		struct Component *nextComponent
+) {
+	const void *address = GetVBR(SysBase);
+
+	return AddToComponents(
+			nextComponent,
+			ComponentType_Region,
+			address,
+			0,
+			0,
+			address,
+			1024,
+			"interrupt vector table"
+	);
+}
+
+static struct Component *AddSystemStackToComponents(
+		struct ExecBase *SysBase,
+		struct Component *nextComponent
+) {
+	return AddToComponents(
+			nextComponent,
+			ComponentType_Region,
+			SysBase->SysStkLower,
+			0,
+			0,
+			SysBase->SysStkLower,
+			(uint8_t *) SysBase->SysStkUpper - (uint8_t *) SysBase->SysStkLower,
+			"system stack"
+	);
 }
 
 static struct Component *AddMemoryToComponents(
@@ -383,7 +460,7 @@ static struct Component *AddMemoryToComponents(
 			memHeader,
 			0,
 			0,
-			memHeader->mh_Lower,
+			memHeader,
 			(uint8_t *) memHeader->mh_Upper - (uint8_t *) memHeader,
 			memHeader->mh_Node.ln_Name
 	);
@@ -613,7 +690,7 @@ static void TestComponentsSpeed(
 		struct DosLibrary *DOSBase,
 		struct CiaTimer *ciaTimer,
 		struct Component *startComponent,
-		void *bestMem,
+		struct Component *bestMemory,
 		bool showAll,
 		bool verbose
 ) {
@@ -629,12 +706,18 @@ static void TestComponentsSpeed(
 	while (component->type != ComponentType_None && component->type != ComponentType_EndMarker) {
 		char sanitizedName[24];
 		SanitizeForPrinting(component->name, sanitizedName, sizeof(sanitizedName));
+		char versionStore[24];
+		const char *version = "       ";
+		if (component->type > ComponentType_Region) {
+			SPrintF(SysBase, versionStore, "%3lu.%-3lu", component->version, component->revision);
+			version = versionStore;
+		}
 		const char *componentTypeString = ComponentType2String(component->type);
-		const char *location = GetLocation(SysBase, component->startAddress);
+		const char *location = GetComponentLocation(SysBase, component);
 
 		const struct FullTimingResult result = TimeReads(SysBase, DOSBase, ciaTimer, component->startAddress, component->size);
 
-		const struct FullTimingResult resultBestMem = TimeReads(SysBase, DOSBase, ciaTimer, (uint8_t *) bestMem + (((size_t) component->startAddress) & 0xff), component->size);
+		const struct FullTimingResult resultBestMem = TimeReads(SysBase, DOSBase, ciaTimer, (uint8_t *) bestMemory->address + (((size_t) component->startAddress) & 0xff), component->size);
 
 		const unsigned percentage = 0 != resultBestMem.speed ?
 				((uint64_t) result.speed * 100 * 10) / resultBestMem.speed :
@@ -652,11 +735,10 @@ static void TestComponentsSpeed(
 			if (verbose) {
 				const struct HumanSize humanBestMemSpeed = CalcHumanSize(SysBase, resultBestMem.speed);
 				Printf(
-						"%-8s %-23s %3lu.%-3lu %s %08lx %-4s %6lu %4lu %s %6lu %5lu %s %5lu.%01lu\n",
+						"%-8s %-23s %3s %s %08lx %-4s %6lu %4lu %s %6lu %5lu %s %5lu.%01lu\n",
 						componentTypeString,
 						sanitizedName,
-						component->version,
-						component->revision,
+						version,
 						humanSize.string,
 						component->address,
 						location,
@@ -673,11 +755,10 @@ static void TestComponentsSpeed(
 			}
 			else {
 				Printf(
-						"%-8s %-23s %3lu.%-3lu %s %-4s %s %5lu.%01lu\n",
+						"%-8s %-23s %s %s %-4s %s %5lu.%01lu\n",
 						componentTypeString,
 						sanitizedName,
-						component->version,
-						component->revision,
+						version,
 						humanSize.string,
 						location,
 						humanSpeed.string,
