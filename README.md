@@ -1,7 +1,24 @@
 # ResidentSpeed
 
 Tests the speed of your AmigaOS system residents and associated components
-and makes it easy to find potential performance problems.
+and makes it easy to find common performance problems.
+
+## Concept
+
+For each resident or other component to be tested, ResidentSpeed will
+measure its read speed. The same measurement will then be done using the
+highest priority memory in the system. If these results deviate too much,
+it will be listed as a performance problem.
+
+The idea behind this is that in a healthy system, most components should be
+in the highest priority memory. If not, low performance will most likely be
+the result.
+
+The results has to be valued by how much the components are used. For
+example anything related to exec.library should definately be as fast as
+possible, as that is the most used component of the system. On the other end
+we have expansion.library which is not used much, so it does not matter much
+where it is located.
 
 ## Usage
 
@@ -17,6 +34,12 @@ SHOWALL/S,VERBOSE/S:
 | SHOWALL   | Show all test results, not just potential performance problems |
 | VERBOSE   | Show more data relevant to the speed measurement               |
 
+### Output fields
+
+| Name      | Description                                                    |
+| --------- | -------------------------------------------------------------- |
+| SHOWALL   | Show all test results, not just potential performance problems |
+| VERBOSE   | Show more data relevant to the speed measurement               |
 
 ### Examples
 
@@ -128,7 +151,8 @@ ResidentSpeed shows a lot of potential performance issues for this system
 too.
 
 In this case the reason is not that complicated, it is simply becase
-Kickstart ROM is very slow on this system compared to fast RAM. Using the
-tools shipped with the accelerator to remap ROM to fast RAM will solve it.
+Kickstart ROM is very slow on this system compared to fast RAM.
 
+This case can be fixed by remapping ROM to fast RAM Using the tools
+shipped with the accelerator.
 
