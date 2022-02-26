@@ -17,7 +17,7 @@
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
-const char Version[] = "$VER: ResidentSpeed 0.68 (27.1.2022) by Patrik Axelsson";
+const char Version[] = "$VER: ResidentSpeed 0.69 (26.2.2022) by Patrik Axelsson";
 
 enum ComponentType {
 	ComponentType_None,
@@ -323,28 +323,69 @@ static bool IsPrintableIso8859(uint8_t c) {
 	return !(c < 0x20 || (c > 0x7e && c < 0xa0));
 }
 
-static const char *GetLocation(struct ExecBase *SysBase, void *address) {
-	const ULONG memType = TypeOfMem(address);
-	
-	return memType & MEMF_CHIP || address < (void *) 262144 ?
-			"Chip" :
-			memType & MEMF_FAST ?
-					"Fast" :
-					(address >= (void *) 0xe00000 && address <= (void *) 0xefffff) ?
-							"Extd" :
-							(address >= (void *) 0xF00000 && address <= (void *) 0xf7ffff) ?
-									"Diag" :
-									(address >= (void *) 0xf80000 && address <= (void *) 0xffffff) ?
-											"Kick" :
-											"Unkn";
+enum Location {
+	Location_Unknown,
+	Location_ChipRAM,
+	Location_FastRAM,
+	Location_ExtendedROM,
+	Location_DiagROM,
+	Location_KickstartROM
+};
+
+/* Compared to exec.library/TypeOfMem(), This will return type attributes
+   even if the address is inside the MemHeader at the beginning of the
+   memory. For example if we would check the type of the address of the
+   memory itself.
+*/
+static ULONG GetMemoryType(struct ExecBase *SysBase, void *address) {
+	struct MemHeader *memHeader;
+	ULONG attributes = 0;
+
+	Forbid();
+	for (memHeader = (void *) SysBase->MemList.lh_Head; NULL != memHeader->mh_Node.ln_Succ; memHeader = (void *) memHeader->mh_Node.ln_Succ) {
+		const void *startAddress = (void *) (memHeader->mh_Attributes & MEMF_CHIP ? 0 : memHeader);
+		const void *endAddress = memHeader->mh_Upper;
+		if (address >= startAddress && address <= endAddress) {
+			attributes = memHeader->mh_Attributes;
+			break;
+		}
+	}
+	Permit();
+	return attributes;
 }
 
-static const char *GetComponentLocation(struct ExecBase *SysBase, const struct Component *component) {
-	const void *address = ComponentType_Memory != component->type ?
-			component->address :
-			(uint8_t *) component->address + (component->size >> 1);
+static enum Location GetLocation(struct ExecBase *SysBase, void *address) {
+	const ULONG memType = GetMemoryType(SysBase, address);
+	
+	return memType & MEMF_CHIP ?
+			Location_ChipRAM :
+			memType & MEMF_FAST ?
+					Location_FastRAM :
+					(address >= (void *) 0xe00000 && address <= (void *) 0xefffff) ?
+							Location_ExtendedROM :
+							(address >= (void *) 0xf00000 && address <= (void *) 0xf7ffff) ?
+									Location_DiagROM :
+									(address >= (void *) 0xf80000 && address <= (void *) 0xffffff) ?
+											Location_KickstartROM :
+											Location_Unknown;
+}
 
-	return GetLocation(SysBase, address);
+static const char *Location2String(enum Location location) {
+	const char *strings[] = {
+		[Location_Unknown] =      "Unkn",
+		[Location_ChipRAM] =      "Chip",
+		[Location_FastRAM] =      "Fast",
+		[Location_ExtendedROM] =  "Extd",
+		[Location_DiagROM] =      "Diag",
+		[Location_KickstartROM] = "Kick"
+		[Location_KickstartROM] = "Kick"
+	};
+
+	if (location > ARRAY_SIZE(strings)) {
+		return "Undf";
+	}
+
+	return strings[location];
 }
 
 static struct Component *AddToComponents(
@@ -713,7 +754,8 @@ static void TestComponentsSpeed(
 			version = versionStore;
 		}
 		const char *componentTypeString = ComponentType2String(component->type);
-		const char *location = GetComponentLocation(SysBase, component);
+		enum Location location = GetLocation(SysBase, component->address); 
+		const char *locationString = Location2String(location);
 
 		const struct FullTimingResult result = TimeReads(SysBase, DOSBase, ciaTimer, component->startAddress, component->size);
 
@@ -741,7 +783,7 @@ static void TestComponentsSpeed(
 						version,
 						humanSize.string,
 						component->address,
-						location,
+						locationString,
 						result.actualLength,
 						result.eClocks,
 						humanSpeed.string,
@@ -760,7 +802,7 @@ static void TestComponentsSpeed(
 						sanitizedName,
 						version,
 						humanSize.string,
-						location,
+						locationString,
 						humanSpeed.string,
 						percentage / 10,
 						percentage % 10

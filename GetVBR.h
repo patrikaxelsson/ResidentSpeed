@@ -1,6 +1,6 @@
 #ifndef _SUPERVISORFUNCTIONS_H_
 #define _SUPERVISORFUNCTIONS_H_
 
-void GetVBRInSupervisorMode(void);
+void *GetVBRInSupervisorMode(void);
 
 #endif
