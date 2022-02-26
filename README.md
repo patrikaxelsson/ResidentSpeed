@@ -34,12 +34,6 @@ SHOWALL/S,VERBOSE/S:
 | SHOWALL   | Show all test results, not just potential performance problems |
 | VERBOSE   | Show more data relevant to the speed measurement               |
 
-### Output fields
-
-| Name      | Description                                                    |
-| --------- | -------------------------------------------------------------- |
-| SHOWALL   | Show all test results, not just potential performance problems |
-| VERBOSE   | Show more data relevant to the speed measurement               |
 
 ### Examples
 
