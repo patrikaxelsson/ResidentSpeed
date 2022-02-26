@@ -378,7 +378,6 @@ static const char *Location2String(enum Location location) {
 		[Location_ExtendedROM] =  "Extd",
 		[Location_DiagROM] =      "Diag",
 		[Location_KickstartROM] = "Kick"
-		[Location_KickstartROM] = "Kick"
 	};
 
 	if (location > ARRAY_SIZE(strings)) {
