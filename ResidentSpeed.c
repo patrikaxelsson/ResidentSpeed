@@ -17,7 +17,7 @@
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
-const char Version[] = "$VER: TestResidentSpeed 0.68 (27.1.2022) by Patrik Axelsson";
+const char Version[] = "$VER: ResidentSpeed 0.68 (27.1.2022) by Patrik Axelsson";
 
 enum ComponentType {
 	ComponentType_None,
@@ -67,7 +67,7 @@ static void TestComponentsSpeed(
 		bool verbose
 );
 
-LONG TestResidentSpeed(void) {
+LONG ResidentSpeed(void) {
 	struct ExecBase *SysBase = *(struct ExecBase **) 4;
 	// Variables needing cleanup at end
 	struct DosLibrary *DOSBase = NULL;

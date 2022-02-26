@@ -1,7 +1,7 @@
-all: TestResidentSpeed
+all: ResidentSpeed
 
-TestResidentSpeed: TestResidentSpeed.c CiaTimer.c GetVBR.asm TimingFunctions.asm CiaTimer.h Makefile
-	vc +aos68k -nostdlib -c99 -O1 -sc -lvc -lamiga -D__NOLIBBASE__ -o $@ $< CiaTimer.c GetVBR.asm TimingFunctions.asm
+ResidentSpeed: ResidentSpeed.c CiaTimer.c GetVBR.asm TimingFunctions.asm CiaTimer.h Makefile
+	vc +aos68k -nostdlib -c99 -O1 -sc -D__NOLIBBASE__ -lvc -lamiga -o $@ $< CiaTimer.c GetVBR.asm TimingFunctions.asm
 
 clean:
-	$(RM) TestResidentSpeed
+	$(RM) ResidentSpeed
