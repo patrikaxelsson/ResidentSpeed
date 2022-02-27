@@ -144,7 +144,7 @@ Resident ram-handler              39.4     8.83k Kick   3.30M    15.2
 ResidentSpeed shows a lot of potential performance issues for this system
 too.
 
-In this case the reason is not that complicated, it is simply becase
+In this case the reason is not that complicated, it is simply because
 Kickstart ROM is very slow on this system compared to fast RAM.
 
 This case can be fixed by remapping ROM to fast RAM Using the tools
