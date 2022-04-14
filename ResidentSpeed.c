@@ -17,7 +17,7 @@
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
-const char Version[] = "$VER: ResidentSpeed 0.69 (26.2.2022) by Patrik Axelsson";
+const char Version[] = "$VER: ResidentSpeed 0.70 (14.4.2022) by Patrik Axelsson";
 
 enum ComponentType {
 	ComponentType_None,
